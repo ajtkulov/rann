@@ -1,0 +1,10 @@
+[package]
+name = "rann"
+version = "0.1.0"
+edition = "2021"
+description = "Approximate nearest-neighbor search via LSH hyperplanes and a dual Bloom-filter virtual trie"
+license = "MIT"
+
+[dependencies]
+rand = "0.8"
+rand_chacha = "0.3"
