@@ -70,10 +70,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_h_is_132() {
-        let p = Projector::new(8, 132, 1729);
-        assert_eq!(p.h, 132);
-        assert_eq!(p.project(&vec![0.0; 8]).bit_len(), 132);
+    fn default_h_is_256() {
+        let p = Projector::new(8, 256, 1729);
+        assert_eq!(p.h, 256);
+        assert_eq!(p.project(&vec![0.0; 8]).bit_len(), 256);
     }
 
     #[test]

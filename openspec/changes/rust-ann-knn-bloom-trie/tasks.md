@@ -6,10 +6,10 @@
 
 ## 2. LSH projection
 
-- [x] 2.1 Implement seeded hyperplane generator for dimension `D` and count `H` (default seed `1729`, `H=132`)
+- [x] 2.1 Implement seeded hyperplane generator for dimension `D` and count `H` (default seed `1729`, `H=256`)
 - [x] 2.2 Implement `project(vector) -> BitCode` using sign of dot products
 - [x] 2.3 Expose plane coefficients for persistence and reconstruct projector from stored planes
-- [x] 2.4 Tests: determinism for same seed; bit polarity for synthetic half-spaces; default `H=132`
+- [x] 2.4 Tests: determinism for same seed; bit polarity for synthetic half-spaces; default `H=256`
 
 ## 3. Bloom filters and virtual trie
 
@@ -17,7 +17,7 @@
 - [x] 3.2 Implement `NN`-bit chunking with zero-padding on the final partial chunk
 - [x] 3.3 Implement insert: write all hash prefixes and `hash||id` prefixes into prefix BF; write full `hash||id` into terminal BF; store id→vector sidecar
 - [x] 3.4 Implement prefix and terminal membership probes
-- [x] 3.5 Tests: insert then positive probes; absent keys negative at low FP rate; key lengths for i32/i64; default `NN=6` and `H=132` alignment
+- [x] 3.5 Tests: insert then positive probes; absent keys negative at low FP rate; key lengths for i32/i64; default `NN=6` and `H=256` chunk count
 
 ## 4. Distance and candidate ranking
 

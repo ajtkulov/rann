@@ -159,7 +159,7 @@ pub struct IndexParams {
 impl Default for IndexParams {
     fn default() -> Self {
         Self {
-            h: 132,
+            h: 256,
             nn: 6,
             seed: 1729,
             fp_rate: 1e-4,
@@ -223,9 +223,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunk_alignment_default() {
-        assert_eq!(132 % 6, 0);
-        assert_eq!(chunk_count(132, 6), 22);
+    fn chunk_count_default_h() {
+        // H=256, NN=6 → 43 chunks (last chunk zero-padded; 256 % 6 == 4)
+        assert_eq!(256 % 6, 4);
+        assert_eq!(chunk_count(256, 6), 43);
     }
 
     #[test]

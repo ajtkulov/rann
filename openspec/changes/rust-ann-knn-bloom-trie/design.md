@@ -2,7 +2,7 @@
 
 Greenfield Rust crate (`rann`) for approximate nearest-neighbor search. Vectors are multi-dimensional floats. The index never materializes an explicit trie of nodes; instead dual Bloom filters encode “prefix exists” and “full hash+id exists,” so traversal is guided by membership queries over `NN`-bit edge labels.
 
-Default hyperparameters from the product brief: `H=132` hash bits, `NN=6` bits per trie edge, random-plane seed `1729`, item id `i32` or `i64`, final ranking by cosine distance.
+Default hyperparameters: `H=256` hash bits, `NN=6` bits per trie edge, random-plane seed `1729`, item id `i32` or `i64`, final ranking by cosine distance.
 
 ## Goals / Non-Goals
 
@@ -28,9 +28,9 @@ Default hyperparameters from the product brief: `H=132` hash bits, `NN=6` bits p
 - **Alternative considered:** workspace with many crates — deferred; one crate keeps the first version simple.
 
 ### 2. Binary code representation
-- Store the `H`-bit hash as a packed bit buffer (`BitVec` or `[u64; ceil(H/64)]`). Default `H=132` → 3×`u64` with 60 unused high bits, or a smallvec of bytes.
+- Store the `H`-bit hash as a packed bit buffer (`BitVec` or `[u64; ceil(H/64)]`). Default `H=256` → exactly 4×`u64`, or a smallvec of bytes.
 - Item id appended as little-endian bits after the hash for the terminal key: `H + 32` or `H + 64` bits depending on `IdWidth`.
-- **Rationale:** matches the “132 + 32/64 bits still binary” requirement; keeps Bloom keys contiguous.
+- **Rationale:** matches the “H + 32/64 bits still binary” requirement; keeps Bloom keys contiguous.
 
 ### 3. Random hyperplanes
 - Seed RNG with `1729` (configurable). Draw `H` unit-ish normal vectors in `D` dimensions (same `D` as the dataset).
@@ -92,5 +92,5 @@ Default hyperparameters from the product brief: `H=132` hash bits, `NN=6` bits p
 
 - Exact default false-positive rate and whether vectors are embedded in the same serialized blob or a companion file.
 - Whether id width is a compile-time feature flag or runtime enum (`IdWidth::U32 | IdWidth::U64`).
-- Whether last partial `NN` chunk (when `H % NN != 0`; `132 % 6 == 0` so default is aligned) should zero-pad — specify pad-with-zeros for non-aligned `H`.
+- Whether last partial `NN` chunk (when `H % NN != 0`; default `H=256` needs padding since `256 % 6 == 4`) should zero-pad — specify pad-with-zeros for non-aligned `H`.
 - Beam width / `max_expansions` default for A* under large indexes.

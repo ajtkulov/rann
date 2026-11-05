@@ -19,10 +19,10 @@ pub struct TrieIndex {
 impl TrieIndex {
     pub fn new(dim: usize, params: IndexParams, expected_items: usize) -> Self {
         let projector = Projector::new(dim, params.h, params.seed);
-        // Prefix inserts: ~hash_chunks + id_chunks per item
+        // Prefix inserts: one padded prefix per chunk of the (padded-hash || id) key
         let hash_chunks = chunk_count(params.h, params.nn);
-        let id_chunks = chunk_count(params.id_width.bits(), params.nn);
-        let prefixes_per_item = hash_chunks + id_chunks;
+        let total_bits = hash_chunks * params.nn + params.id_width.bits();
+        let prefixes_per_item = chunk_count(total_bits, params.nn);
         let prefix_n = expected_items.max(1) * prefixes_per_item;
         let terminal_n = expected_items.max(1);
         Self {
@@ -54,9 +54,12 @@ impl TrieIndex {
         self.projector.dim
     }
 
-    /// Build terminal key = hash bits || id bits (LE).
+    /// Build terminal key = zero-padded hash (to `ceil(H/NN)*NN` bits) || id bits (LE).
+    /// Padding keeps search path labels aligned when `H % NN != 0`.
     pub fn terminal_key(&self, hash: &BitCode, id: i64) -> BitCode {
-        let mut key = hash.clone();
+        let nn = self.params.nn;
+        let hash_chunks = chunk_count(self.params.h, nn);
+        let mut key = padded_prefix(hash, hash_chunks, nn);
         let width = self.params.id_width.bits();
         let raw = match self.params.id_width {
             IdWidth::U32 => (id as u32) as u64,
@@ -73,15 +76,14 @@ impl TrieIndex {
 
         let nn = self.params.nn;
         let hash_chunks = chunk_count(self.params.h, nn);
-        let total_bits = full.bit_len();
-        let total_chunks = chunk_count(total_bits, nn);
+        let total_chunks = chunk_count(full.bit_len(), nn);
 
-        // Hash-only prefixes
+        // Hash-only prefixes (same bytes as full-key prefixes for k <= hash_chunks)
         for k in 1..=hash_chunks {
             let pref = padded_prefix(&hash, k, nn);
             self.prefix_bf.insert_code(&pref);
         }
-        // Prefixes spanning into id bits (full key prefixes)
+        // Prefixes spanning into id bits
         for k in (hash_chunks + 1)..=total_chunks {
             let pref = padded_prefix(&full, k, nn);
             self.prefix_bf.insert_code(&pref);
@@ -158,26 +160,28 @@ mod tests {
     #[test]
     fn terminal_key_lengths() {
         let p32 = IndexParams {
-            h: 132,
+            h: 256,
             id_width: IdWidth::U32,
             ..IndexParams::default()
         };
         let idx32 = TrieIndex::new(3, p32, 1);
-        let h = BitCode::zeros(132);
-        assert_eq!(idx32.terminal_key(&h, 7).bit_len(), 164);
+        let h = BitCode::zeros(256);
+        // padded hash = 43*6 = 258, + 32 id bits = 290
+        assert_eq!(idx32.terminal_key(&h, 7).bit_len(), 290);
 
         let p64 = IndexParams {
-            h: 132,
+            h: 256,
             id_width: IdWidth::U64,
             ..IndexParams::default()
         };
         let idx64 = TrieIndex::new(3, p64, 1);
-        assert_eq!(idx64.terminal_key(&h, 7).bit_len(), 196);
+        // padded hash 258 + 64 id bits = 322
+        assert_eq!(idx64.terminal_key(&h, 7).bit_len(), 322);
     }
 
     #[test]
-    fn default_nn_h_alignment() {
-        assert_eq!(chunk_count(132, 6), 22);
-        assert_eq!(132 % 6, 0);
+    fn default_nn_h_chunk_count() {
+        assert_eq!(chunk_count(256, 6), 43);
+        assert_eq!(256 % 6, 4); // last chunk zero-padded
     }
 }

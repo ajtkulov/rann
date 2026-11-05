@@ -163,7 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let params = IndexParams {
-        h: 132,
+        h: 256,
         nn: 6,
         seed: 1729,
         fp_rate,

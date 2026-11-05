@@ -12,6 +12,7 @@ pub mod types;
 
 pub use distance::{CosineDistance, Distance};
 pub use projection::Projector;
+pub use search::{CandidateSet, HammingStrategy, SearchParams};
 pub use serde_index::SerdeError;
 pub use trie_index::{build_from_dataset, TrieIndex};
 pub use types::{BitCode, IdWidth, IndexParams};

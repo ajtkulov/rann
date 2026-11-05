@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Deterministic hyperplane projection
-The system SHALL project a multi-dimensional float vector into an `H`-bit binary code by comparing the vector against `H` random hyperplanes generated from a configurable seed (default seed `1729`, default `H=132`).
+The system SHALL project a multi-dimensional float vector into an `H`-bit binary code by comparing the vector against `H` random hyperplanes generated from a configurable seed (default seed `1729`, default `H=256`).
 
 #### Scenario: Bit set by half-space
 - **WHEN** a vector `x` is projected and the dot product with plane `i` is greater than or equal to zero
@@ -20,7 +20,7 @@ The system SHALL allow `H` to be configured as a hyperparameter and SHALL produc
 
 #### Scenario: Default hash length
 - **WHEN** a projector is created without overriding `H`
-- **THEN** the binary code length SHALL be `132` bits
+- **THEN** the binary code length SHALL be `256` bits
 
 ### Requirement: Planes available for persistence
 The system SHALL expose the generated hyperplane coefficients so they can be stored with an index and reused at search time without relying on cross-platform RNG replay alone.

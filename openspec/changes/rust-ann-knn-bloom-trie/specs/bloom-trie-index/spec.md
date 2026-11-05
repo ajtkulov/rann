@@ -22,20 +22,20 @@ The system SHALL split binary keys into chunks of `NN` bits (default `NN=6`) for
 - **WHEN** an index is created without overriding `NN`
 - **THEN** edge labels SHALL be `6` bits wide (`64` possible labels per depth)
 
-#### Scenario: Aligned default H
-- **WHEN** `H=132` and `NN=6`
-- **THEN** the hash portion SHALL span exactly `22` chunks with no padding
+#### Scenario: Default H chunking
+- **WHEN** `H=256` and `NN=6`
+- **THEN** the hash portion SHALL span `43` chunks with the last chunk zero-padded (`256 % 6 == 4`)
 
 ### Requirement: Item id width
 The system SHALL support item ids as either 32-bit or 64-bit signed integers, appending the id’s bit representation to the hash bits to form the terminal key.
 
 #### Scenario: Terminal key length with 32-bit ids
-- **WHEN** the index is configured for 32-bit ids and `H=132`
-- **THEN** each terminal key SHALL be `164` bits before chunk padding
+- **WHEN** the index is configured for 32-bit ids and `H=256` (`NN=6`)
+- **THEN** each terminal key SHALL be `290` bits (hash zero-padded to `258`, plus `32` id bits)
 
 #### Scenario: Terminal key length with 64-bit ids
-- **WHEN** the index is configured for 64-bit ids and `H=132`
-- **THEN** each terminal key SHALL be `196` bits before chunk padding
+- **WHEN** the index is configured for 64-bit ids and `H=256` (`NN=6`)
+- **THEN** each terminal key SHALL be `322` bits (hash zero-padded to `258`, plus `64` id bits)
 
 ### Requirement: No reliable deletion in v1
 The system SHALL NOT provide an item-deletion API that guarantees removal from the Bloom filters.

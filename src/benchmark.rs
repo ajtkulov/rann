@@ -1,6 +1,6 @@
 //! Dataset KNN microbenchmark: query cohorts, timings, JSON + HTML reports.
 
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::distance::{top_k_by_distance, CosineDistance};
+use crate::search::{HammingStrategy, SearchParams};
 use crate::trie_index::TrieIndex;
 
 pub const DEFAULT_K_VALUES: [usize; 5] = [3, 5, 10, 20, 50];
@@ -21,7 +22,10 @@ pub const RANDOM_COHORT_SIZE: usize = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
+    /// HashMap sidecar walk + per-vector cosine (legacy exact path).
     Exact,
+    /// Contiguous in-memory full dataset scan (baseline).
+    Fullscan,
     Ann,
 }
 
@@ -29,6 +33,7 @@ impl SearchMode {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "exact" => Some(SearchMode::Exact),
+            "fullscan" | "baseline" => Some(SearchMode::Fullscan),
             "ann" => Some(SearchMode::Ann),
             _ => None,
         }
@@ -37,8 +42,122 @@ impl SearchMode {
     pub fn as_str(self) -> &'static str {
         match self {
             SearchMode::Exact => "exact",
+            SearchMode::Fullscan => "fullscan",
             SearchMode::Ann => "ann",
         }
+    }
+}
+
+/// Contiguous row-major matrix for exact full-dataset scan baseline.
+#[derive(Debug, Clone)]
+pub struct FullscanIndex {
+    pub ids: Vec<i64>,
+    /// `n * dim` floats, row-major.
+    pub data: Vec<f32>,
+    /// Precomputed L2 norms per row.
+    pub norms: Vec<f32>,
+    pub dim: usize,
+}
+
+impl FullscanIndex {
+    pub fn from_vectors(vectors: &HashMap<i64, Vec<f32>>, dim: usize) -> Self {
+        let mut ids: Vec<i64> = vectors.keys().copied().collect();
+        ids.sort_unstable();
+        let n = ids.len();
+        let mut data = Vec::with_capacity(n * dim);
+        let mut norms = Vec::with_capacity(n);
+        for &id in &ids {
+            let v = vectors.get(&id).expect("id present");
+            assert_eq!(v.len(), dim);
+            let mut ss = 0.0f32;
+            for &x in v {
+                data.push(x);
+                ss += x * x;
+            }
+            norms.push(ss.sqrt());
+        }
+        Self {
+            ids,
+            data,
+            norms,
+            dim,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// Exact cosine top-K over the entire matrix (smaller distance = nearer).
+    pub fn search_topk(&self, query: &[f32], k: usize) -> Vec<(i64, f32)> {
+        assert_eq!(query.len(), self.dim);
+        let k = k.min(self.len()).max(1);
+        let mut q_norm_sq = 0.0f32;
+        for &x in query {
+            q_norm_sq += x * x;
+        }
+        let q_norm = q_norm_sq.sqrt();
+
+        // Max-heap of (distance, row) so we can pop worst; keep k best (smallest dist).
+        let mut heap: BinaryHeap<(OrderedFloat, usize)> = BinaryHeap::new();
+
+        for row in 0..self.len() {
+            let start = row * self.dim;
+            let row_slice = &self.data[start..start + self.dim];
+            let mut dot = 0.0f32;
+            for (a, b) in query.iter().zip(row_slice.iter()) {
+                dot += a * b;
+            }
+            let nb = self.norms[row];
+            let dist = if q_norm == 0.0 || nb == 0.0 {
+                f32::INFINITY
+            } else {
+                1.0 - (dot / (q_norm * nb)).clamp(-1.0, 1.0)
+            };
+
+            if heap.len() < k {
+                heap.push((OrderedFloat(dist), row));
+            } else if let Some(top) = heap.peek() {
+                if dist < top.0 .0 {
+                    heap.pop();
+                    heap.push((OrderedFloat(dist), row));
+                }
+            }
+        }
+
+        let mut out: Vec<(i64, f32)> = heap
+            .into_iter()
+            .map(|(OrderedFloat(d), row)| (self.ids[row], d))
+            .collect();
+        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+}
+
+/// Total-order wrapper so `f32` distances can live in a `BinaryHeap`.
+#[derive(Copy, Clone, Debug)]
+struct OrderedFloat(f32);
+
+impl PartialEq for OrderedFloat {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl Eq for OrderedFloat {}
+impl PartialOrd for OrderedFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OrderedFloat {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -55,6 +174,12 @@ pub struct KRun {
     pub k: usize,
     pub elapsed_ms: f64,
     pub neighbors: Vec<NeighborHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expansions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bloom_probes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recall: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +212,8 @@ pub struct RunReport {
     pub version: u32,
     pub dataset: String,
     pub mode: SearchMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
     pub seed: u64,
     pub k_values: Vec<usize>,
     pub load_ms: f64,
@@ -94,6 +221,21 @@ pub struct RunReport {
     pub dim: usize,
     pub queries: Vec<QueryResult>,
     pub summary: Summary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recall_by_k: Option<HashMap<String, f64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyCompareReport {
+    pub version: u32,
+    pub dataset: String,
+    pub seed: u64,
+    pub k_values: Vec<usize>,
+    pub load_ms: f64,
+    pub num_vectors: usize,
+    pub dim: usize,
+    pub ground_truth: String,
+    pub strategies: Vec<RunReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +367,20 @@ pub fn run_benchmark(
         index.params.max_expansions = index.params.max_expansions.max(5_000_000);
     }
 
+    // Pack contiguous matrix once; not charged to per-query timings.
+    let fullscan = if mode == SearchMode::Fullscan {
+        eprintln!(
+            "Packing fullscan matrix ({} × {}) ...",
+            num_vectors, dim
+        );
+        let t_pack = Instant::now();
+        let fs = FullscanIndex::from_vectors(&index.vectors, dim);
+        eprintln!("Packed in {:.1} ms", t_pack.elapsed().as_secs_f64() * 1000.0);
+        Some(fs)
+    } else {
+        None
+    };
+
     let mut queries = Vec::with_capacity(query_specs.len());
     for spec in &query_specs {
         let vector = index
@@ -238,6 +394,10 @@ pub fn run_benchmark(
             let t0 = Instant::now();
             let hits = match mode {
                 SearchMode::Exact => exact_topk(index, &vector, k),
+                SearchMode::Fullscan => fullscan
+                    .as_ref()
+                    .expect("fullscan matrix")
+                    .search_topk(&vector, k),
                 SearchMode::Ann => index.search(&vector, k),
             };
             let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -253,6 +413,9 @@ pub fn run_benchmark(
                 k,
                 elapsed_ms,
                 neighbors,
+                expansions: None,
+                bloom_probes: None,
+                recall: None,
             });
         }
         queries.push(QueryResult {
@@ -268,6 +431,7 @@ pub fn run_benchmark(
         version: 1,
         dataset: dataset.to_string(),
         mode,
+        strategy: None,
         seed,
         k_values: k_values.to_vec(),
         load_ms,
@@ -275,7 +439,208 @@ pub fn run_benchmark(
         dim,
         queries,
         summary,
+        recall_by_k: None,
     }
+}
+
+fn recall_at_k(pred: &[(i64, f32)], truth: &[(i64, f32)]) -> f64 {
+    if truth.is_empty() {
+        return 1.0;
+    }
+    let truth_ids: HashSet<i64> = truth.iter().map(|(id, _)| *id).collect();
+    let hit = pred.iter().filter(|(id, _)| truth_ids.contains(id)).count();
+    hit as f64 / truth.len() as f64
+}
+
+/// Benchmark one or more ANN Hamming strategies vs fullscan ground truth.
+pub fn run_strategy_compare(
+    index: &mut TrieIndex,
+    dataset: &str,
+    strategies: &[HammingStrategy],
+    seed: u64,
+    k_values: &[usize],
+    load_ms: f64,
+    id_to_word: &HashMap<i64, String>,
+    search_params_base: &SearchParams,
+) -> StrategyCompareReport {
+    let num_vectors = index.vectors.len();
+    let dim = index.dim();
+    let query_specs = build_query_set(num_vectors, seed);
+
+    eprintln!("Packing fullscan ground truth matrix...");
+    let t_pack = Instant::now();
+    let gt = FullscanIndex::from_vectors(&index.vectors, dim);
+    eprintln!("Packed in {:.1} ms", t_pack.elapsed().as_secs_f64() * 1000.0);
+
+    index.params.max_expansions = index
+        .params
+        .max_expansions
+        .max(search_params_base.max_expansions.unwrap_or(5_000_000));
+
+    let mut strategy_reports = Vec::new();
+    for &strategy in strategies {
+        eprintln!("Strategy {} ...", strategy.as_str());
+        let mut params = search_params_base.clone();
+        params.strategy = strategy;
+
+        let mut queries = Vec::with_capacity(query_specs.len());
+        let mut recall_samples: HashMap<usize, Vec<f64>> = HashMap::new();
+
+        for spec in &query_specs {
+            let vector = index.vectors.get(&spec.id).cloned().unwrap();
+            let word = id_to_word.get(&spec.id).cloned();
+            let qhash = index.projector.project(&vector);
+
+            // Time discovery once per query; rerank cheaply per K.
+            let t0 = Instant::now();
+            let cands = index.discover_candidates(&qhash, &params);
+            let discover_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+            let mut runs = Vec::new();
+            for &k in k_values {
+                let truth = gt.search_topk(&vector, k);
+                let t1 = Instant::now();
+                let hits = top_k_by_distance(
+                    &vector,
+                    &cands.ids,
+                    &index.vectors,
+                    k,
+                    &CosineDistance,
+                );
+                let rerank_ms = t1.elapsed().as_secs_f64() * 1000.0;
+                let rec = recall_at_k(&hits, &truth);
+                recall_samples.entry(k).or_default().push(rec);
+                let neighbors = hits
+                    .into_iter()
+                    .map(|(id, distance)| NeighborHit {
+                        id,
+                        word: id_to_word.get(&id).cloned(),
+                        distance,
+                    })
+                    .collect();
+                runs.push(KRun {
+                    k,
+                    // Attribute discovery cost to each K row for comparable mean latency.
+                    elapsed_ms: discover_ms + rerank_ms,
+                    neighbors,
+                    expansions: Some(cands.expansions),
+                    bloom_probes: Some(cands.bloom_probes),
+                    recall: Some(rec),
+                });
+            }
+            queries.push(QueryResult {
+                cohort: spec.cohort.to_string(),
+                id: spec.id,
+                word,
+                runs,
+            });
+        }
+
+        let summary = build_summary(&queries);
+        let recall_by_k: HashMap<String, f64> = recall_samples
+            .into_iter()
+            .map(|(k, samples)| {
+                let mean = samples.iter().sum::<f64>() / samples.len().max(1) as f64;
+                (k.to_string(), mean)
+            })
+            .collect();
+
+        strategy_reports.push(RunReport {
+            version: 1,
+            dataset: dataset.to_string(),
+            mode: SearchMode::Ann,
+            strategy: Some(strategy.as_str().to_string()),
+            seed,
+            k_values: k_values.to_vec(),
+            load_ms,
+            num_vectors,
+            dim,
+            queries,
+            summary,
+            recall_by_k: Some(recall_by_k),
+        });
+    }
+
+    StrategyCompareReport {
+        version: 2,
+        dataset: dataset.to_string(),
+        seed,
+        k_values: k_values.to_vec(),
+        load_ms,
+        num_vectors,
+        dim,
+        ground_truth: "fullscan".into(),
+        strategies: strategy_reports,
+    }
+}
+
+pub fn write_strategy_json(
+    report: &StrategyCompareReport,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    serde_json::to_writer_pretty(File::create(path)?, report)?;
+    Ok(())
+}
+
+pub fn render_strategy_html(report: &StrategyCompareReport) -> String {
+    let mut rows = String::new();
+    let mut ks = report.k_values.clone();
+    ks.sort_unstable();
+    for s in &report.strategies {
+        let name = s.strategy.as_deref().unwrap_or("?");
+        for &k in &ks {
+            let key = k.to_string();
+            let timing = s.summary.by_k.get(&key);
+            let recall = s
+                .recall_by_k
+                .as_ref()
+                .and_then(|m| m.get(&key))
+                .copied()
+                .unwrap_or(0.0);
+            let mean = timing.map(|t| t.mean_ms).unwrap_or(0.0);
+            let p50 = timing.map(|t| t.p50_ms).unwrap_or(0.0);
+            rows.push_str(&format!(
+                "<tr><td>{name}</td><td>{k}</td><td>{mean:.3}</td><td>{p50:.3}</td><td>{recall:.4}</td></tr>\n"
+            ));
+        }
+    }
+    format!(
+        r##"<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>strategy compare</title>
+<style>
+body{{font-family:system-ui,sans-serif;margin:2rem}}
+table{{border-collapse:collapse}} th,td{{border:1px solid #ccc;padding:.4rem .7rem}}
+th{{background:#f0f0f0}}
+</style></head><body>
+<h1>Hamming strategy compare</h1>
+<p>Dataset <code>{dataset}</code> · GT fullscan · seed {seed} · {n} × {d}d</p>
+<table>
+<thead><tr><th>strategy</th><th>K</th><th>mean ms</th><th>p50 ms</th><th>recall@K</th></tr></thead>
+<tbody>
+{rows}
+</tbody></table>
+</body></html>
+"##,
+        dataset = html_escape(&report.dataset),
+        seed = report.seed,
+        n = report.num_vectors,
+        d = report.dim,
+    )
+}
+
+pub fn write_strategy_html(
+    report: &StrategyCompareReport,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = File::create(path)?;
+    f.write_all(render_strategy_html(report).as_bytes())?;
+    Ok(())
 }
 
 pub fn write_json(report: &RunReport, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -586,5 +951,36 @@ mod tests {
         let html = render_html(&parsed);
         assert!(html.contains("Mean KNN latency"));
         assert!(html.contains("<svg"));
+    }
+
+    #[test]
+    fn fullscan_matches_exact_neighbors() {
+        let index = tiny_index();
+        let fs = FullscanIndex::from_vectors(&index.vectors, index.dim());
+        let q = index.vectors.get(&0).unwrap();
+        let a = exact_topk(&index, q, 5);
+        let b = fs.search_topk(q, 5);
+        assert_eq!(a.len(), b.len());
+        for ((id_a, d_a), (id_b, d_b)) in a.iter().zip(b.iter()) {
+            assert_eq!(id_a, id_b);
+            assert!((d_a - d_b).abs() < 1e-5, "{d_a} vs {d_b}");
+        }
+    }
+
+    #[test]
+    fn fullscan_benchmark_runs() {
+        let mut index = tiny_index();
+        let report = run_benchmark(
+            &mut index,
+            "test://tiny-fullscan",
+            SearchMode::Fullscan,
+            1729,
+            &[3, 10],
+            0.0,
+            &HashMap::new(),
+        );
+        assert_eq!(report.mode, SearchMode::Fullscan);
+        assert_eq!(report.queries.len(), 40);
+        assert!(report.summary.by_k.contains_key("10"));
     }
 }

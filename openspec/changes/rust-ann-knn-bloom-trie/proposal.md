@@ -4,7 +4,7 @@ Approximate nearest-neighbor search over high-dimensional vectors needs a compac
 
 ## What Changes
 
-- Add a Rust crate that projects multi-dimensional float vectors into an `H`-bit binary code using a fixed set of random hyperplanes (seed `1729`, default `H=132`).
+- Add a Rust crate that projects multi-dimensional float vectors into an `H`-bit binary code using a fixed set of random hyperplanes (seed `1729`, default `H=256`).
 - Store each hashed vector plus item id (`int32` or `int64`) as a binary key in an in-memory dual-Bloom-filter trie: a prefix Bloom filter for path existence and a terminal Bloom filter for full `vector+id` membership.
 - Split binary keys into `NN`-bit chunks (default `NN=6`) for trie edge labels.
 - Implement ANN/KNN search: convert the query to a binary code, A*-traverse the virtual trie guided by prefix Bloom checks while minimizing Hamming distance on the vector bits, collect valid ids via terminal Bloom checks into an array buffer, then rerank and return top-K by cosine distance (configurable distance function).
